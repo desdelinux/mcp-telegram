@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { chmod, readFile, unlink, writeFile } from "node:fs/promises";
+import { chmod, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -862,11 +862,38 @@ export class TelegramService {
     }, `sendMessage to ${chatId}`);
   }
 
-  async sendFile(chatId: string, filePath: string, caption?: string): Promise<void> {
+  /**
+   * Send a file as a document.
+   *
+   * `opts.fileName` overrides the name the recipient sees. Without it GramJS
+   * derives BOTH the document name and the MIME type from `basename(filePath)`
+   * (see `utils.getAttributes`), which is wrong for any caller that materializes
+   * bytes into an opaque temp file — the hosted server stores uploads as
+   * `upl_<uuid>` with no extension, so recipients used to get a nameless
+   * `application/octet-stream` blob.
+   *
+   * With a name we hand GramJS a `CustomFile` instead of the bare path, so the
+   * filename attribute AND the MIME type are derived from the real name; the
+   * bytes are still streamed from disk, no copy is made. `forceDocument` is
+   * pinned on that path so supplying a name can never silently turn an
+   * attachment into a re-compressed photo — extension-less paths already went
+   * out as documents, and this keeps that contract.
+   */
+  async sendFile(chatId: string, filePath: string, caption?: string, opts: { fileName?: string } = {}): Promise<void> {
     if (!this.client || !this.connected) throw new Error(NOT_CONNECTED_ERROR);
+    const fileName = opts.fileName;
     // pi-lens-ignore: sql-injection
     await this.rateLimiter.execute(async () => {
       const resolved = await this.resolvePeer(chatId);
+      if (fileName) {
+        const { size } = await stat(filePath);
+        await this.client?.sendFile(resolved, {
+          file: new CustomFile(fileName, size, filePath),
+          caption,
+          forceDocument: true,
+        });
+        return;
+      }
       await this.client?.sendFile(resolved, { file: filePath, caption });
     }, `sendFile to ${chatId}`);
   }
@@ -879,6 +906,10 @@ export class TelegramService {
       replyTo?: number;
       topicId?: number;
       parseMode?: "md" | "html";
+      /** Original name of the audio. GramJS sniffs the codec from the name, so an
+       * extension-less temp path yields `application/octet-stream` and no
+       * DocumentAttributeAudio. See sendFile for the full rationale. */
+      fileName?: string;
     } = {},
   ): Promise<{ id: number }> {
     if (!this.client || !this.connected) throw new Error(NOT_CONNECTED_ERROR);
@@ -886,10 +917,11 @@ export class TelegramService {
     // pi-lens-ignore: sql-injection
     return this.rateLimiter.execute(async () => {
       const resolved = await this.resolvePeer(chatId);
+      const file = opts.fileName ? new CustomFile(opts.fileName, (await stat(filePath)).size, filePath) : filePath;
       // Duration is intentionally auto-detected by GramJS from the audio file —
       // letting the AI override it would mis-report playback length in the Telegram UI.
       const message = await client.sendFile(resolved, {
-        file: filePath,
+        file,
         voiceNote: true,
         caption: opts.caption,
         parseMode: opts.parseMode,
@@ -1093,7 +1125,7 @@ export class TelegramService {
 
   async sendAlbum(
     chatId: string,
-    items: Array<{ filePath: string; caption?: string }>,
+    items: Array<{ filePath: string; caption?: string; fileName?: string }>,
     opts: {
       caption?: string;
       parseMode?: "md" | "html";
@@ -1111,11 +1143,23 @@ export class TelegramService {
       const resolved = await this.resolvePeer(chatId);
       // Album-level caption lands on the first item; per-item captions stay as provided.
       const captions = items.map((it, i) => (i === 0 ? (opts.caption ?? it.caption ?? "") : (it.caption ?? "")));
+      // Named items travel as CustomFile so Telegram gets the real name + MIME
+      // instead of `basename(tempPath)`. forceDocument is pinned for the whole
+      // album in that case: album members must be homogeneous, and extension-less
+      // temp paths already went out as documents — naming them must not silently
+      // promote images to compressed photos and break the grouping.
+      const named = items.some((it) => it.fileName);
+      const files = await Promise.all(
+        items.map(async (it) =>
+          it.fileName ? new CustomFile(it.fileName, (await stat(it.filePath)).size, it.filePath) : it.filePath,
+        ),
+      );
       // GramJS sendFile auto-detects `file: string[]` and takes the _sendAlbum path,
       // which invokes messages.UploadMedia per item + messages.SendMultiMedia.
       const result = (await client.sendFile(resolved, {
-        file: items.map((it) => it.filePath),
+        file: files,
         caption: captions,
+        ...(named ? { forceDocument: true } : {}),
         parseMode: opts.parseMode,
         ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
         ...(opts.topicId ? { topMsgId: opts.topicId } : {}),
