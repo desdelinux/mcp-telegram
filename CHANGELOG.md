@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.43.0](https://github.com/mcp-telegram/mcp-telegram/compare/v1.42.0...v1.43.0) (2026-09-21)
+
+
+### Added
+
+* **media:** let callers name uploaded files so Telegram gets the real name and MIME ([eb1bd66](https://github.com/mcp-telegram/mcp-telegram/commit/eb1bd66a1b8994506d48909c5626fb8162736134))
+
 ## [1.42.0](https://github.com/mcp-telegram/mcp-telegram/compare/v1.41.7...v1.42.0) (2026-09-16)
 
 
